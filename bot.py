@@ -1,154 +1,115 @@
 import os
-import asyncio
+import requests
 import logging
-from flask import Flask
-from threading import Thread
-import httpx  # کتابخانه ناهمگام برای بالا بردن سرعت ارتباط با هوش مصنوعی
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from flask import Flask, request
+import telebot
 
-# فعال‌سازی لاگ برای بررسی وضعیت ربات در پنل رندر
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
+# --- تنظیمات لاگ‌گیری برای پیدا کردن راحت‌تر ارورها در داشبورد رندر ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --- ۱. وب‌سرور داخلی برای زنده نگه داشتن رندر ---
-app = Flask('')
+# --- دریافت متغیرهای محیطی امن ---
+TOKEN = os.environ.get('TELEGRAM_TOKEN')
+OPENROUTER_KEY = os.environ.get('OPENROUTER_API_KEY')
+RENDER_URL = os.environ.get('RENDER_URL')
 
-@app.route('/')
-def home():
-    return "MASHALLAH! The Bot is Active, Safe, and Super Fast."
+# مقداردهی اولیه
+bot = telebot.TeleBot(TOKEN)
+app = Flask(__name__)
 
-def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
-
-# --- ۲. فراخوانی امن کلیدها از تنظیمات سرور (Environment Variables) ---
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-RENDER_URL = os.environ.get("RENDER_URL") 
-
-# تعریف ۳ موتور هوش مصنوعی قدرتمند بر اساس نیاز
-MODELS = {
-    "CODING": "qwen/qwen-2.5-coder-32b-instruct", # غول کدنویسی و برنامه نویسی بدون محدودیت حجم
-    "MATH": "deepseek/deepseek-r1",              # مدل استدلالی برای ریاضی و فیزیک
-    "GENERAL": "google/gemini-flash-1.5"          # مدل فوق‌سریع برای چت‌های عمومی
-}
-
-# پرامپت مهندسی شده برای فهم دقیق کلمه "چطوری" و جلوگیری از احوال‌پرسی کاذب
-SYSTEM_PROMPT = """تو یک دستیار هوشمند، بسیار باهوش و متخصص فنی هستی.
-قانون حیاتی: کاربر کلماتی مثل 'چطور'، 'چطوری' یا 'چگونه' را برای پرسیدن روش انجام یک کار فنی یا آموزشی به کار می‌برد (مثلاً: چطوری بات بنویسم؟ چطوری مسئله را حل کنم؟).
-هرگز و تحت هیچ شرایطی این کلمات را با احوال‌پرسی اشتباه نگیر! به هیچ وجه نگو 'من خوبم شما چطوری'. 
-بلافاصله برو سراغ اصل مطلب و پاسخ فنی، الگوریتمی یا راهکار عملی را به صورت گام‌به‌گام و شیک به زبان فارسی توضیح بده."""
-
-# --- ۳. سیستم پینگ خودکار داخلی برای بیدار نگه داشتن سرور ---
-async def keep_alive_ping():
-    await asyncio.sleep(30) # صبر برای لود شدن کامل سرور
-    async with httpx.AsyncClient() as client:
-        while True:
-            try:
-                if RENDER_URL and RENDER_URL.startswith("https"):
-                    response = await client.get(RENDER_URL, timeout=10.0)
-                    logger.info(f"Self-Ping successful! Status Code: {response.status_code}")
-            except Exception as e:
-                logger.warning(f"Self-Ping failed: {e}")
-            
-            # هر ۱۰ دقیقه یک‌بار پینگ می‌فرستد
-            await asyncio.sleep(600)
-
-# --- ۴. تابع ارتباطی کاملاً Async با OpenRouter (عامل اصلی حذف تاخیر ۱۰ ثانیه‌ای) ---
-async def ask_openrouter_async(user_message, model_name):
-    if not OPENROUTER_API_KEY:
-        return "❌ خطا: کلید API اوپن‌روتر در تنظیمات رندر ست نشده است."
-        
+# --- تابع ارتباط با OpenRouter ---
+def get_openrouter_response(user_message):
+    url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://render.com", 
-        "X-Title": "Amir Architect Bot"
+        "Authorization": f"Bearer {OPENROUTER_KEY}",
+        "Content-Type": "application/json"
     }
-    data = {
-        "model": model_name,
+    payload = {
+        "model": "google/gemini-2.0-flash-exp:free",
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            # در خط زیر می‌توانی شخصیت ربات را تغییر دهی
+            {"role": "system", "content": "شما یک دستیار هوش مصنوعی هوشمند، مودب و کمک‌کننده هستید که به زبان فارسی و با لحن دوستانه پاسخ می‌دهید."},
             {"role": "user", "content": user_message}
         ]
     }
     
-    async with httpx.AsyncClient(timeout=40.0) as client:
-        try:
-            response = await client.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data)
-            response_json = response.json()
-            return response_json['choices'][0]['message']['content']
-        except Exception as e:
-            logger.error(f"OpenRouter Error: {e}")
-            return "❌ خطایی در پردازش هوش مصنوعی رخ داد. لطفاً مجدداً تلاش کنید."
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=20)
+        response.raise_for_status() # بررسی ارورهای HTTP
+        return response.json()['choices'][0]['message']['content']
+    except Exception as e:
+        logging.error(f"OpenRouter API Error: {e}")
+        return "متأسفانه مشکلی در ارتباط با سرور هوش مصنوعی پیش آمده. لطفاً کمی بعد دوباره تلاش کنید. 🔄"
 
-# --- ۵. منطق تلگرام و تفکیک هوشمند پیام‌ها (Routing) ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "سلام امیر جان! معماری جدید، ۳ موتوره و ایمن ربات فعال شد.\n"
-        "سیستم بدون تاخیر پیام‌ها را پردازش می‌کند. سوالت را بپرس:"
+# --- مدیریت دستور /start ---
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    welcome_text = (
+        "سلام! 👋 به ربات هوشمند من خوش آمدی.\n\n"
+        "من به مدل رایگان Gemini متصل هستم. هر سوالی داری می‌توانی بپرسی!"
     )
+    bot.reply_to(message, welcome_text)
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text
-    chat_id = update.message.chat_id
-    
-    # ارسال فوری وضعیت در حال تایپ به کاربر برای حس سرعت بالا
-    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+# --- مدیریت دستور /help ---
+@bot.message_handler(commands=['help'])
+def send_help(message):
+    help_text = (
+        "🤖 **راهنمای استفاده:**\n\n"
+        "🔸 کافیست سوال یا متن خود را بفرستی تا من جواب دهم.\n"
+        "🔸 در حال حاضر من فقط پیام‌های متنی را متوجه می‌شوم.\n"
+        "🔸 اگر پاسخم طولانی شد، کمی صبور باش تا متن کامل تولید شود."
+    )
+    bot.reply_to(message, help_text, parse_mode='Markdown')
 
-    # روتینگ پیش‌فرض روی مدل عمومی
-    selected_model = MODELS["GENERAL"]
+# --- مدیریت پیام‌های متنی عادی ---
+@bot.message_handler(content_types=['text'])
+def handle_text_messages(message):
+    # ارسال وضعیت "در حال تایپ..."
+    bot.send_chat_action(message.chat.id, 'typing')
     
-    # تفکیک هوشمند برای کدهای برنامه‌نویسی و طراحی وب
-    if any(word in user_text.lower() for word in ["کد", "برنامه", "python", "html", "css", "سایت", "ساخت", "کدنویسی", "ربات"]):
-        selected_model = MODELS["CODING"]
-        logger.info(f"Routing to CODING model for chat_id {chat_id}")
+    # دریافت جواب
+    ai_reply = get_openrouter_response(message.text)
     
-    # تفکیک هوشمند برای مسائل ریاضی، فیزیک و محاسباتی
-    elif any(word in user_text for word in ["حل", "فرمول", "ریاضی", "فیزیک", "محاسبه"]) or any(char.isdigit() for char in user_text):
-        selected_model = MODELS["MATH"]
-        logger.info(f"Routing to MATH model for chat_id {chat_id}")
-
-    # گرفتن پاسخ از اوپن‌روتر بدون قفل شدن سرور
-    reply_text = await ask_openrouter_async(user_text, selected_model)
-    
-    # ارسال ایمن پاسخ به تلگرام و جلوگیری از کرش‌های فرمت مارک‌داون
+    # تلاش برای ارسال پیام با فرمت زیبای Markdown
     try:
-        await update.message.reply_text(reply_text, parse_mode="Markdown")
-    except Exception as parse_error:
-        logger.warning(f"Markdown failed, sending plain text: {parse_error}")
-        await update.message.reply_text(reply_text)
+        bot.reply_to(message, ai_reply, parse_mode='Markdown')
+    except Exception as e:
+        logging.warning(f"Markdown formatting failed, sending plain text. Error: {e}")
+        # اگر در متن هوش مصنوعی کاراکتر خاصی بود که باعث ارور تلگرام شد، پیام را به صورت متن ساده می‌فرستد
+        bot.reply_to(message, ai_reply)
 
-# --- ۶. راه‌اندازی و اجرای همزمان کل سیستم ---
-async def main():
-    if not TELEGRAM_TOKEN:
-        logger.error("Telegram Token NOT FOUND in Environment Variables!")
-        return
+# --- مدیریت پیام‌های غیرمتنی (عکس، صدا، فایل و...) ---
+@bot.message_handler(content_types=['photo', 'video', 'audio', 'document', 'voice', 'sticker'])
+def handle_non_text(message):
+    bot.reply_to(message, "من فعلاً چشم و گوش ندارم! 👀 فقط می‌توانم متن‌ها را بخوانم. لطفاً سوالت را برایم تایپ کن. ✍️")
 
-    # اجرای وب‌سرور در ترید مستقل
-    Thread(target=run_flask, daemon=True).start()
+# --- مسیر اصلی وب‌هوک ---
+@app.route(f'/{TOKEN}', methods=['POST'])
+def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return 'OK', 200
+    else:
+        return 'Forbidden', 403
+
+# --- مسیر زنده نگه داشتن سرور (Keep Alive) ---
+@app.route('/', methods=['GET'])
+def index():
+    return "🚀 Bot Server is running perfectly!", 200
+
+# --- اجرای برنامه ---
+if __name__ == "__main__":
+    # حذف وب‌هوک قدیمی برای جلوگیری از تداخل
+    bot.remove_webhook()
     
-    # اجرای تسک پس‌زمینه پینگ خودکار
-    asyncio.create_task(keep_alive_ping())
-
-    # کانفیگ نهایی پایتون تلگرام بات
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
+    # تنظیم آدرس دقیق وب‌هوک
+    base_url = RENDER_URL if RENDER_URL.endswith('/') else f"{RENDER_URL}/"
+    webhook_url = f"{base_url}{TOKEN}"
     
-    logger.info("Secure Bot is fully polling now...")
+    bot.set_webhook(url=webhook_url)
+    logging.info(f"✅ Webhook successfully set to: {webhook_url}")
     
-    while True:
-        await asyncio.sleep(3600)
-
-if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot stopped cleanly.")
-        
+    # استارت سرور
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
