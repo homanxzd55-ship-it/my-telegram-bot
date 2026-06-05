@@ -11,7 +11,7 @@ OPENROUTER_FAST_KEY = os.getenv("OPENROUTER_FAST_KEY")
 OPENROUTER_HEAVY_KEY = os.getenv("OPENROUTER_HEAVY_KEY")
 
 # آیدی عددی تلگرام خودت و دوستت (آیدی‌های واقعی خودتان را جایگزین این دو عدد فرضی کن)
-ALLOWED_USERS = [12345678, 87654321] 
+ALLOWED_USERS = [6148577369,5547255464] 
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 app = Flask('')
