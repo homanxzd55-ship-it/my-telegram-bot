@@ -13,7 +13,7 @@ bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
 # لیست آیدی‌های عددی مجاز (خودت و رفیقت)
-ALLOWED_USERS = [5482361944, 6172943051]
+ALLOWED_USERS = [6148577369,5547255464]
 
 # ۱. موتور اول: Gemini 1.5 Flash (از طریق ورکر کلاودفلر شما)
 def ask_gemini(prompt):
