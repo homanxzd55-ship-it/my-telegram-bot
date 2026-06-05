@@ -1,71 +1,129 @@
 import os
 import telebot
 import requests
-from flask import Flask
-from threading import Thread
+from flask import Flask, request
 
-# --- ربات اطلاعات حساس را مستقیم از پنل امن رندر می‌خواند ---
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-OPENROUTER_FAST_KEY = os.getenv("OPENROUTER_FAST_KEY")
-OPENROUTER_HEAVY_KEY = os.getenv("OPENROUTER_HEAVY_KEY")
+# دریافت توکن‌ها از Environment Variables رندر
+TOKEN = os.environ.get('TELEGRAM_TOKEN')
+OPENROUTER_FAST_KEY = os.environ.get('OPENROUTER_FAST_KEY')
+OPENROUTER_HEAVY_KEY = os.environ.get('OPENROUTER_HEAVY_KEY')
+GEMINI_KEY = os.environ.get('GEMINI_KEY')
 
-# آیدی عددی تلگرام خودت و دوستت (آیدی‌های واقعی خودتان را جایگزین این دو عدد فرضی کن)
-ALLOWED_USERS = [6148577369,5547255464] 
+bot = telebot.TeleBot(TOKEN)
+app = Flask(__name__)
 
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
-app = Flask('')
+# لیست آیدی‌های عددی مجاز (خودت و رفیقت)
+ALLOWED_USERS = [5482361944, 6172943051]
 
-@app.route('/')
-def home():
-    return "Gemix AI Bot is Online!"
-
-def run_server():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
-
-# --- توابع هوش مصنوعی ---
-def call_ai(prompt, api_key, model_name):
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    data = {"model": model_name, "messages": [{"role": "user", "content": prompt}]}
-    response = requests.post(url, headers=headers, json=data, timeout=60)
-    return response.json()['choices'][0]['message']['content']
-
-def call_gemini(prompt):
-    # به جای YOUR_WORKER_URL آدرس ورکر کلاودفلر خودت را بگذار
-    url = f"https://YOUR_WORKER_URL/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
-    response = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=30)
-    return response.json()['candidates'][0]['content']['parts'][0]['text']
-
-# --- مدیریت هوشمند پیام‌ها ---
-@bot.message_handler(func=lambda message: message.from_user.id in ALLOWED_USERS)
-def handle_message(message):
-    user_prompt = message.text
-    
-    # تشخیص هوشمند سوالات سنگین و ریاضی برای مدل دقیق (DeepSeek R1)
-    if len(user_prompt) > 100 or any(char in user_prompt for char in ['+', '-', '=', '/', '*']):
-        try:
-            bot.reply_to(message, "⏳ در حال پردازش سنگین و دقیق...")
-            reply = call_ai(user_prompt, OPENROUTER_HEAVY_KEY, "deepseek/deepseek-r1")
-            bot.reply_to(message, reply)
-            return
-        except Exception as e:
-            print(f"Heavy AI failed: {e}")
-
-    # پردازش سریع روزمره
+# ۱. موتور اول: Gemini 1.5 Flash (از طریق ورکر کلاودفلر شما)
+def ask_gemini(prompt):
+    model = "gemini-1.5-flash"
+    # آدرس ورکر کلاودفلر شما دقیقاً در اینجا جایگذاری شد:
+    url = f"https://gemini-worker.ilberich6831-cell.workers.dev/v1beta/models/{model}:generateContent?key={GEMINI_KEY}"
+    headers = {'Content-Type': 'application/json'}
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
     try:
-        reply = call_gemini(user_prompt)
-        bot.reply_to(message, reply)
+        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        if response.status_code == 200:
+            return response.json()['candidates'][0]['content']['parts'][0]['text']
     except:
-        try:
-            reply = call_ai(user_prompt, OPENROUTER_FAST_KEY, "meta-llama/llama-3-8b-instruct:free")
-            bot.reply_to(message, reply)
-        except:
-            bot.reply_to(message, "⚠️ سیستم شلوغ است. دوباره تلاش کن.")
+        return None
+    return None
+
+# ۲. موتور دوم: OpenRouter - DeepSeeks (سریع و سبک برای پاسخ‌های کوتاه و ریاضی)
+def ask_openrouter_fast(prompt):
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_FAST_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "deepseek/deepseek-chat",
+        "messages": [{"role": "user", "content": prompt}]
+    }
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        if response.status_code == 200:
+            return response.json()['choices'][0]['message']['content']
+    except:
+        return None
+    return None
+
+# ۳. موتور سوم: OpenRouter - DeepSeek R1 (سنگین و استدلالی برای کارهای پیچیده)
+def ask_openrouter_heavy(prompt):
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_HEAVY_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "deepseek/deepseek-r1",
+        "messages": [{"role": "user", "content": prompt}]
+    }
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
+        if response.status_code == 200:
+            return response.json()['choices'][0]['message']['content']
+    except:
+        return None
+    return None
+
+# سیستم هوشمند مسیریابی پیام‌ها (سیستم ۳ موتوره)
+def generate_response(prompt):
+    # الف) اگر پیام نیاز به استدلال سنگین دارد (کلمات کلیدی خاص) -> موتور سوم (Heavy)
+    heavy_keywords = ['چرا', 'دلیل', 'ثابت کن', 'برنامه‌نویسی', 'کد', 'تحلیل']
+    if any(keyword in prompt for keyword in heavy_keywords) or len(prompt) > 150:
+        res = ask_openrouter_heavy(prompt)
+        if res: return res
+
+    # ب) اگر پیام محاسباتی یا فرمول ریاضی دارد -> موتور دوم (Fast)
+    math_chars = ['+', '-', '*', '/', '=', '^', 'x', 'y', 'حل کن', 'ریاضی']
+    if any(char in prompt for char in math_chars):
+        res = ask_openrouter_fast(prompt)
+        if res: return res
+
+    # ج) پیام‌های عمومی، چت عادی و پیش‌فرض -> اول موتور اول (Gemini)
+    res = ask_gemini(prompt)
+    if res: return res
+
+    # د) لایه‌های بک‌آپ و پشتیبان در صورت قطعی هر کدام
+    res = ask_openrouter_fast(prompt)
+    if res: return res
+    
+    res = ask_openrouter_heavy(prompt)
+    if res: return res
+
+    return "⚠️ سیستم شلوغ است. دوباره تلاش کن."
+
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    if message.from_user.id in ALLOWED_USERS:
+        bot.reply_to(message, "🤖 سیستم ۳ موتوره‌ی هوش مصنوعی فعال شد!\n\nآماده پاسخگویی به سوالات عمومی، محاسبات ریاضی و تحلیل‌های سنگین شما هستم. بپرس!")
+
+@bot.message_handler(func=lambda message: True)
+def handle_message(message):
+    if message.from_user.id not in ALLOWED_USERS:
+        return
+    
+    sent_msg = bot.reply_to(message, "⏳ در حال پردازش توسط هوش مصنوعی...")
+    user_prompt = message.text
+    ai_response = generate_response(user_prompt)
+    
+    bot.edit_message_text(ai_response, chat_id=message.chat.id, message_id=sent_msg.message_id)
+
+@app.route('/' + TOKEN, methods=['POST'])
+def getMessage():
+    json_string = request.get_data().decode('utf-8')
+    update = telebot.types.Update.de_json(json_string)
+    bot.process_new_updates([update])
+    return "!", 200
+
+@app.route("/")
+def webhook():
+    bot.remove_webhook()
+    bot.set_webhook(url='https://' + request.host + '/' + TOKEN)
+    return "🤖 Gemix System Active...", 200
 
 if __name__ == "__main__":
-    Thread(target=run_server).start()
-    print("🤖 Gemix System Active...")
-    bot.infinity_polling()
+    app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 10000)))
     
