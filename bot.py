@@ -1,287 +1,157 @@
 import os
 import logging
 import asyncio
-from flask import Flask
-from threading import Thread
-from datetime import datetime, timedelta
-from collections import defaultdict
-from io import BytesIO
-
-# کتابخانه‌های اصلی ربات و هوش مصنوعی
+from fastapi import FastAPI, Request, HTTPException
+import uvicorn
+import google.generativeai as genai
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart
+from aiogram.types import Update
 from aiogram.enums import ParseMode
-from aiogram.client.default import DefaultBotProperties
-from google import genai
-from google.genai import types as genai_types
-from PIL import Image
 
-# ۱. پیکربندی سیستم لاگینگ پیشرفته برای دیباگ و امنیت پروپوزال
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger("AdvancedDevBot")
+# ==========================================
+# 1. تنظیمات امنیتی و متغیرهای محیطی (Environment Variables)
+# ==========================================
+# به هیچ وجه توکن‌ها را مستقیماً در کد ننویسید! 
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # آدرس سایت رندر شما، مثال: https://my-bot.onrender.com
 
-# ۲. دور زدن محدودیت پورت رندر (Render Port Keeper)
-app = Flask('')
-
-@app.route('/')
-def home():
-    return f"Bot is alive! Server time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-
-def keep_alive_server():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
-
-# روشن کردن سرور فِیک در یک Thread مجزا
-Thread(target=keep_alive_server, daemon=True).start()
-logger.info("Keep-Alive server started successfully to prevent Render Port Timeout.")
-
-# ۳. مدیریت امن توکن‌ها از طریق متغیرهای محیطی (Environment Variables)
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-
-# دریافت ۳ تا API Key جمینای برای جلوگیری از محدودیت درخواست (Rate Limit)
+# دریافت 3 کلید API از محیط رندر
 GEMINI_KEYS = [
-    os.environ.get("GEMINI_KEY_1"),
-    os.environ.get("GEMINI_KEY_2"),
-    os.environ.get("GEMINI_KEY_3")
+    os.getenv("GEMINI_KEY_1"),
+    os.getenv("GEMINI_KEY_2"),
+    os.getenv("GEMINI_KEY_3")
 ]
-
-# فیلتر کردن کلیدهای خالی جهت پایداری سیستم
+# حذف کلیدهای خالی (در صورتی که یکی را وارد نکردید)
 GEMINI_KEYS = [key for key in GEMINI_KEYS if key]
 
-if not TOKEN:
-    critical_error = "CRITICAL ERROR: TELEGRAM_BOT_TOKEN is missing!"
-    logger.critical(critical_error)
-    raise ValueError(critical_error)
+if not BOT_TOKEN or not WEBHOOK_URL or not GEMINI_KEYS:
+    raise ValueError("توکن ربات، آدرس وب‌هوک یا کلیدهای جمینای در تنظیمات رندر وارد نشده‌اند!")
 
-if not GEMINI_KEYS:
-    critical_error = "CRITICAL ERROR: At least one GEMINI_KEY must be provided!"
-    logger.critical(critical_error)
-    raise ValueError(critical_error)
+# مسیر مخفی برای وب‌هوک جهت امنیت بیشتر (فقط تلگرام این آدرس را می‌داند)
+WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 
-# ۴. سیستم چرخشی پیشرفته مدیریت کلیدهای هوش مصنوعی (API Key Rotator)
-class APIKeyRotator:
+# ==========================================
+# 2. کلاس مدیریت و چرخش کلیدهای جمینای (Load Balancing)
+# ==========================================
+class GeminiManager:
     def __init__(self, keys):
         self.keys = keys
-        self.index = 0
-        self.lock = asyncio.Lock()
-
-    async def get_next_client(self) -> genai.Client:
-        async with self.lock:
-            key = self.keys[self.index]
-            # چرخش ایندکس بین کلیدها
-            self.index = (self.index + 1) % len(self.keys)
-            logger.info(f"Rotating to API Key Index: {self.index} to balance load.")
-            return genai.Client(api_key=key)
-
-rotator = APIKeyRotator(GEMINI_KEYS)
-
-# ۵. سیستم مدیریت حافظه و تاریخچه گفتگو به تفکیک کاربر (Session Handler)
-class UserSessionManager:
-    def __init__(self):
-        # نگهداری سوابق چت به صورت ساختار یافته
-        self.history = defaultdict(list)
-        # سیستم ضد اسپم (Anti-Flood Rate Limiting) برای جلوگیری از مسدود سازی تلگرام
-        self.last_request = defaultdict(lambda: datetime.min)
-        # دستورالعمل سیستم فوق‌العاده قوی برای تخصصی کردن پاسخ‌های جمینای در حوزه کدنویسی
+        self.current_index = 0
+        # تنظیم پرامپت سیستم برای اینکه ربات مثل یک مهندس نرم‌افزار حرفه‌ای رفتار کند
         self.system_instruction = (
-            "You are a Senior Software Engineer, Software Architect, and Elite Code Debugger "
-            "with over 20 years of experience. Your mission is to analyze complex code, discover "
-            "hidden bugs, optimize memory leaks, and write clean, production-ready, efficient code. "
-            "Always explain the 'why' behind your fixes using professional tech terminology. "
-            "Format code blocks properly using markdown with the appropriate language specified."
+            "You are an expert Senior Software Engineer and coding assistant. "
+            "Provide clean, well-documented, and efficient code. "
+            "Explain your logic briefly. Answer in Persian unless the user asks for English."
         )
 
-    def get_history(self, user_id: int):
-        return self.history[user_id]
+    def get_next_key(self):
+        """کلید بعدی را برای توزیع بار (Round-Robin) برمی‌گرداند"""
+        key = self.keys[self.current_index]
+        self.current_index = (self.current_index + 1) % len(self.keys)
+        return key
 
-    def add_to_history(self, user_id: int, role: str, text: str):
-        self.history[user_id].append({"role": role, "parts": [{"text": text}]})
-        # نگهداری حداکثر ۲۰ پیام آخر برای مدیریت مصرف توکن و پردازش بهینه
-        if len(self.history[user_id]) > 20:
-            self.history[user_id] = self.history[user_id][-20:]
+    async def generate_response(self, prompt: str) -> str:
+        """ارسال درخواست به جمینای با قابلیت تست کلیدهای جایگزین در صورت خرابی"""
+        for _ in range(len(self.keys)):
+            current_key = self.get_next_key()
+            genai.configure(api_key=current_key)
+            
+            # استفاده از مدل فلش که برای متن و کد بسیار سریع و بهینه است
+            model = genai.GenerativeModel(
+                model_name='gemini-1.5-flash',
+                system_instruction=self.system_instruction
+            )
+            
+            try:
+                # اجرای درخواست در یک ترد جداگانه تا سرور متوقف نشود
+                response = await asyncio.to_thread(model.generate_content, prompt)
+                return response.text
+            except Exception as e:
+                logging.error(f"Error with key starting with {current_key[:5]}: {e}")
+                continue # اگر این کلید ارور داد (مثلا لیمیت شده بود)، برو کلید بعدی
+                
+        return "⚠️ متأسفانه در حال حاضر تمام کلیدهای هوش مصنوعی من به سقف مجاز رسیده‌اند یا خطایی رخ داده است. لطفا چند دقیقه دیگر تلاش کنید."
 
-    def clear_history(self, user_id: int):
-        if user_id in self.history:
-            del self.history[user_id]
+gemini_manager = GeminiManager(GEMINI_KEYS)
 
-    def is_flooding(self, user_id: int) -> bool:
-        # محدودیت ۳ ثانیه فاصله بین هر درخواست کاربر برای امنیت سرور
-        now = datetime.now()
-        if now - self.last_request[user_id] < timedelta(seconds=3):
-            return True
-        self.last_request[user_id] = now
-        return False
-
-session_manager = UserSessionManager()
-
-# ۶. مقداردهی اولیه ربات با تنظیمات امنیتی ساختار ناهمگام (Async Bot Initialization)
-bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
+# ==========================================
+# 3. راه‌اندازی تلگرام و سرور
+# ==========================================
+bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+app = FastAPI()
 
-# دستور /start
+# ==========================================
+# 4. هندلرهای تلگرام (منطق ربات)
+# ==========================================
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
-    user_name = message.from_user.first_name
     welcome_text = (
-        f"سلام *{user_name}* گرامی! 🚀\n\n"
-        "به ربات تخصصی مهندسی نرم‌افزار و هوش مصنوعی توسعه‌دهندگان خوش آمدید.\n\n"
-        "🔹 **قابلیت‌ها:**\n"
-        "• تحلیل و دیباگ کدهای پیچیده کامپایلری\n"
-        "• بهینه‌سازی کدهای چندرشته‌ای و معماری سیستم\n"
-        "• خواندن اسکرین‌شات ارورها و حل باگ خودکار\n\n"
-        "📝 برای شروع، کد یا سوال فنی خود را بفرستید. برای پاکسازی حافظه چت دستور /clear را بزنید."
+        "سلام! 👨‍💻\n"
+        "من یک دستیار کدنویسی حرفه‌ای (بر پایه مدل جمینای) هستم.\n"
+        "کافیه سوال برنامه‌نویسی، دیباگ یا قطعه کد خودت رو برام بفرستی تا کمکت کنم."
     )
-    await message.answer(welcome_text)
+    await message.reply(welcome_text)
 
-# دستور /clear برای ریست حافظه
-@dp.message(Command("clear"))
-async def cmd_clear(message: types.Message):
-    session_manager.clear_history(message.from_user.id)
-    await message.answer("🧹 *حافظه چت شما با موفقیت پاک شد.* ربات آماده چالش‌های جدید است!")
-
-# ۷. پردازنده هوشمند درخواست‌های متنی (Text Code Processor)
-@dp.message(F.text & ~F.text.startswith('/'))
-async def handle_text_query(message: types.Message):
-    user_id = message.from_user.id
-    
-    # مکانیزم امنیتی ضد اسپم تلگرام
-    if session_manager.is_flooding(user_id):
-        await message.answer("⚠️ لطفاً کمی آرام‌تر! برای پایداری سرور، بین پیام‌ها ۳ ثانیه فاصله بگذارید.")
-        return
-
-    # ارسال وضعیت "در حال تایپ" به تلگرام جهت ایجاد تجربه کاربری عالی
+@dp.message(F.text)
+async def handle_coding_queries(message: types.Message):
+    # ارسال وضعیت "در حال تایپ..." به کاربر
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
-    status_msg = await message.answer("🤖 *در حال تحلیل کدهای شما توسط مغز هوش مصنوعی...*")
-
-    try:
-        # دریافت کلاینت بعدی از چرخنده کدهای گوگل
-        client = await rotator.get_next_client()
-        
-        # بازیابی سوابق چت و چسباندن پیام جدید
-        user_text = message.text
-        chat_history = session_manager.get_history(user_id)
-        
-        # تبدیل تاریخچه محلی به قالب رسمی ساختار جمینای نوع داده Content
-        contents = []
-        for h in chat_history:
-            contents.append(genai_types.Content(role=h["role"], parts=[genai_types.Part.from_text(text=h["parts"][0]["text"])]))
-        
-        # افزودن پیام فعلی کاربر
-        contents.append(genai_types.Content(role="user", parts=[genai_types.Part.from_text(text=user_text)]))
-
-        # فراخوانی API به صورت کاملاً غیرمسدودکننده (Asynchronous Wrapped Exec)
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: client.models.generate_content(
-                model='gemini-1.5-pro',  # استفاده از قوی‌ترین مدل برای کدهای پیچیده
-                contents=contents,
-                config=genai_types.GenerateContentConfig(
-                    system_instruction=session_manager.system_instruction,
-                    temperature=0.2, # کاهش خلاقیت برای افزایش دقت در کدهای فنی
-                    max_output_tokens=4000
-                )
-            )
-        )
-
-        ai_response = response.text
-        
-        # ذخیره در حافظه لوکال سرور برای پیام‌های بعدی
-        session_manager.add_to_history(user_id, "user", user_text)
-        session_manager.add_to_history(user_id, "model", ai_response)
-
-        # ارسال نهایی پاسخ به تلگرام و پاک کردن پیام وضعیت
-        await status_msg.delete()
-        
-        # اگر پاسخ طولانی بود، تلگرام محدودیت ۴۰۹۶ کاراکتر دارد؛ آن را تکه‌تکه ارسال می‌کنیم
-        if len(ai_response) > 4000:
-            for i in range(0, len(ai_response), 4000):
-                await message.answer(ai_response[i:i+4000])
-        else:
-            await message.answer(ai_response)
-
-    except Exception as e:
-        logger.error(f"Error while processing text for user {user_id}: {str(e)}")
-        await status_msg.edit_text("❌ متأسفانه مشکلی در پردازش کد رخ داد. لطفاً دوباره تلاش کنید.")
-
-# ۸. پردازنده مولتی‌مدیا و بینایی ماشین برای اسکرین‌شات‌ها (Vision Error Processor)
-@dp.message(F.photo)
-async def handle_photo_query(message: types.Message):
-    user_id = message.from_user.id
     
-    if session_manager.is_flooding(user_id):
-        await message.answer("⚠️ لطفاً بین ارسال درخواست‌ها کمی فاصله بگذارید.")
-        return
-
-    await bot.send_chat_action(chat_id=message.chat.id, action="typing")
-    status_msg = await message.answer("📸 *اسکرین‌شات شما دریافت شد. در حال اسکن خطاهای تصویری...*")
-
+    # پیام اولیه برای اینکه کاربر بداند ربات در حال فکر کردن است
+    wait_msg = await message.reply("⏳ در حال پردازش و نوشتن کد...")
+    
     try:
-        # ۱. دانلود فایل تصویر از سرورهای تلگرام در مموری بایت‌ها بدون ذخیره روی هارد دیسک (امنیت و سرعت بالاترا)
-        photo = message.photo[-1] # انتخاب باکیفیت‌ترین نسخه عکس
-        file_info = await bot.get_file(photo.file_id)
+        # دریافت پاسخ از جمینای
+        ai_response = await gemini_manager.generate_response(message.text)
         
-        file_buffer = BytesIO()
-        await bot.download_file(file_info.file_path, file_buffer)
-        file_buffer.seek(0)
+        # تلگرام محدودیت ۴۰۹۶ کاراکتر در هر پیام دارد. پیام‌های طولانی (مثل کدهای بلند) باید تکه‌تکه شوند.
+        max_length = 4000
+        parts = [ai_response[i:i+max_length] for i in range(0, len(ai_response), max_length)]
         
-        # ۲. باز کردن عکس با PIL Pillow
-        img = Image.open(file_buffer)
-
-        # کلاینت هوش مصنوعی چرخشی
-        client = await rotator.get_next_client()
-        
-        caption = message.caption if message.caption else "این اسکرین‌شات از باگ یا محیط کدهای من است. آن را تحلیل کن و دقیقاً بگو مشکل کجاست و چطور حل می‌شود."
-
-        # ۳. ارسال همزمان عکس و متن به مدل مولتی‌مدیال
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: client.models.generate_content(
-                model='gemini-1.5-flash', # مدل فلش برای کارهای دیداری فوق‌العاده سریع و دقیق عمل می‌کند
-                contents=[img, caption],
-                config=genai_types.GenerateContentConfig(
-                    system_instruction=session_manager.system_instruction,
-                    temperature=0.3
-                )
-            )
-        )
-
-        ai_response = response.text
-        
-        # اضافه کردن خلاصه به تاریخچه متنی کاربر
-        session_manager.add_to_history(user_id, "user", f"[ارسال تصویر با موضوع]: {caption}")
-        session_manager.add_to_history(user_id, "model", ai_response)
-
-        await status_msg.delete()
-        
-        if len(ai_response) > 4000:
-            for i in range(0, len(ai_response), 4000):
-                await message.answer(ai_response[i:i+4000])
-        else:
-            await message.answer(ai_response)
-
+        for part in parts:
+            # ارسال پیام (از فرمت مارک‌داون استفاده نمی‌کنیم تا کاراکترهای خاص کدها باعث ارور تلگرام نشوند)
+            await message.reply(part)
+            
     except Exception as e:
-        logger.error(f"Error while processing photo for user {user_id}: {str(e)}")
-        await status_msg.edit_text("❌ خطایی در خواندن تصویر یا پردازش آن توسط هوش مصنوعی رخ داد.")
-
-# ۹. تابع اصلی راه اندازی کل سیستم با تضمین مدیریت خطاهای پولینگ
-async def main():
-    logger.info("Initializing Bot Polling Session...")
-    try:
-        # حذف هرگونه وب‌هوک قدیمی برای جلوگیری از اختلال در اتصال
-        await bot.delete_webhook(drop_pending_updates=True)
-        # استارت زدن حلقه اصلی اجرای ربات
-        await dp.start_polling(bot)
-    except Exception as e:
-        logger.critical(f"Bot execution stopped due to polling error: {str(e)}")
+        logging.error(f"Telegram Send Error: {e}")
+        await message.reply("❌ خطایی در ارسال پاسخ به وجود آمد.")
     finally:
-        await bot.session.close()
+        # پاک کردن پیام "در حال پردازش..."
+        await wait_msg.delete()
 
-if __name__ == "__main__":
-    # اجرای پروژه در ساختار لوپ پایتون
-    asyncio.run(main())
+# ==========================================
+# 5. تنظیمات FastAPI برای Webhook و Render
+# ==========================================
+@app.on_event("startup")
+async def on_startup():
+    """این تابع هنگام روشن شدن سرور رندر اجرا می‌شود و وب‌هوک را تنظیم می‌کند"""
+    webhook_info = await bot.get_webhook_info()
+    target_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
     
+    if webhook_info.url != target_url:
+        await bot.set_webhook(url=target_url, drop_pending_updates=True)
+        logging.info(f"Webhook set to {target_url}")
+
+@app.post(WEBHOOK_PATH)
+async def telegram_webhook(request: Request):
+    """دریافت پیام‌ها از سرور تلگرام"""
+    try:
+        update_data = await request.json()
+        update = Update(**update_data)
+        await dp.feed_update(bot=bot, update=update)
+        return {"status": "ok"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/")
+async def root():
+    """یک صفحه ساده برای اینکه UptimeRobot بتواند ربات را بیدار نگه دارد"""
+    return {"status": "Bot is Running", "message": "The coding assistant is awake!"}
+
+# این بخش فقط برای تست روی سیستم شخصی است. در رندر از دستورات استارت استفاده می‌شود.
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
+        
