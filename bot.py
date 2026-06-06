@@ -1,198 +1,287 @@
 import os
-import time
-import telebot
-from flask import Flask, request, render_template_string
-import google.generativeai as genai
+import logging
+import asyncio
+from flask import Flask
+from threading import Thread
+from datetime import datetime, timedelta
+from collections import defaultdict
+from io import BytesIO
 
-# ==========================================
-# ۱. دریافت کاملاً امن متغیرها از رندر
-# ==========================================
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL")
-raw_gemini_keys = os.environ.get("GEMINI_API_KEYS", "")
+# کتابخانه‌های اصلی ربات و هوش مصنوعی
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import CommandStart, Command
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
+from google import genai
+from google.genai import types as genai_types
+from PIL import Image
 
-# استخراج و تمیزکاری کلیدهای جمینای
-GEMINI_KEYS = [key.strip() for key in raw_gemini_keys.split(",") if key.strip()]
+# ۱. پیکربندی سیستم لاگینگ پیشرفته برای دیباگ و امنیت پروپوزال
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger("AdvancedDevBot")
 
-app = Flask(__name__)
-bot = None
-bot_status = "🔴 متغیر TELEGRAM_BOT_TOKEN در رندر یافت نشد!"
-bot_username = ""
+# ۲. دور زدن محدودیت پورت رندر (Render Port Keeper)
+app = Flask('')
 
-# راه‌اندازی ربات تلگرام با مکانیزم جلوگیری از کرش سرور
-if BOT_TOKEN and not BOT_TOKEN.startswith("YOUR_"):
-    try:
-        # استفاده از وب‌هوک سازگار با هاست‌های بدون پولینگ
-        bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
-        bot_info = bot.get_me()
-        bot_username = f"@{bot_info.username}"
-        bot_status = f"🟢 متصل به تلگرام ({bot_info.first_name})"
-    except Exception as e:
-        bot_status = f"🔴 خطا در توکن تلگرام: {str(e)}"
-        bot = None
-
-# تنظیم خودکار وب‌هوک تلگرام
-webhook_status = "🔴 غیرفعال (تنظیمات ناقص)"
-if bot and RENDER_URL:
-    try:
-        webhook_url = f"{RENDER_URL.rstrip('/')}/{BOT_TOKEN}"
-        bot.remove_webhook()
-        time.sleep(1)
-        bot.set_webhook(url=webhook_url)
-        webhook_status = f"🟢 فعال روی آدرس {webhook_url}"
-        print(f"🛰️ Webhook successfully established: {webhook_url}")
-    except Exception as e:
-        webhook_status = f"🔴 خطا در ثبت وب‌هوک: {str(e)}"
-        print(f"❌ Webhook registration failed: {e}")
-
-# ==========================================
-# ۲. صفحه وب عیب‌یابی و راهنمای زنده (ویژه گوشی)
-# ==========================================
 @app.route('/')
-def diagnostics_dashboard():
-    # تست وضعیت زنده کلیدهای جمینای
-    gemini_status_list = []
-    working_keys = 0
-    for i, key in enumerate(GEMINI_KEYS):
-        try:
-            genai.configure(api_key=key)
-            test_model = genai.GenerativeModel('gemini-1.5-flash')
-            # تست بسیار سریع و کم‌حجم کلید
-            test_model.generate_content("ping", generation_config={"max_output_tokens": 1})
-            gemini_status_list.append(f"<li>🔑 کلید شماره {i+1}: <span style='color: #10b981; font-weight: bold;'>✅ فعال و سالم</span></li>")
-            working_keys += 1
-        except Exception as e:
-            err_str = str(e)
-            status_desc = "❌ کلید اشتباه یا مسدود"
-            if "API_KEY_INVALID" in err_str:
-                status_desc = "❌ کلید نامعتبر است"
-            elif "429" in err_str or "quota" in err_str:
-                status_desc = "⚠️ محدودیت ظرفیت (Rate Limit)"
-            gemini_status_list.append(f"<li>🔑 کلید شماره {i+1}: <span style='color: #ef4444; font-weight: bold;'>{status_desc}</span></li>")
+def home():
+    return f"Bot is alive! Server time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
-    keys_html = "".join(gemini_status_list) if GEMINI_KEYS else "<li><span style='color: #ef4444; font-weight: bold;'>❌ هیچ کلیدی تعریف نشده است!</span></li>"
-    
-    # تعیین وضعیت کلی سیستم
-    system_healthy = (bot is not None) and (working_keys > 0) and (RENDER_URL is not None)
-    badge_text = "🟢 ربات برنامه‌نویسی فعال و آماده کار است" if system_healthy else "🔴 ربات دارای نقص فنی در تنظیمات است"
-    badge_bg = "#e0f2fe" if system_healthy else "#fee2e2"
-    badge_color = "#0369a1" if system_healthy else "#b91c1c"
-
-    html = f"""
-    <!DOCTYPE html>
-    <html lang="fa" dir="rtl">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>پنل عیب‌یابی ربات هوش مصنوعی</title>
-        <style>
-            body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif; background-color: #0f172a; color: #cbd5e1; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 15px; }}
-            .card {{ background: #1e293b; padding: 25px; border-radius: 20px; box-shadow: 0 10px 25px rgba(0,0,0,0.3); max-width: 450px; width: 100%; border: 1px solid #334155; }}
-            h1 {{ text-align: center; font-size: 20px; color: #38bdf8; margin-top: 0; }}
-            .badge {{ text-align: center; font-weight: bold; padding: 10px; border-radius: 10px; margin: 20px 0; background: {badge_bg}; color: {badge_color}; font-size: 14px; }}
-            .item {{ background: #0f172a; padding: 12px; border-radius: 12px; margin-bottom: 15px; border: 1px solid #334155; font-size: 13px; }}
-            .title {{ color: #94a3b8; font-weight: bold; display: block; margin-bottom: 5px; }}
-            ul {{ padding-right: 20px; margin: 5px 0; }}
-            .alert {{ background: #1e1b4b; border-right: 4px solid #6366f1; padding: 12px; border-radius: 8px; font-size: 12px; color: #c7d2fe; line-height: 1.6; margin-top: 15px; }}
-        </style>
-    </head>
-    <body>
-        <div class="card">
-            <h1>📡 پنل وضعیت هوشمند Gemix</h1>
-            <div class="badge">{badge_text}</div>
-            
-            <div class="item">
-                <span class="title">🔌 وضعیت اتصال به تلگرام</span>
-                <b>وضعیت:</b> {bot_status}<br>
-                {f"<b>لینک ربات:</b> <a href='https://t.me/{bot_username[1:]}' style='color: #38bdf8; text-decoration: none;'>{bot_username}</a>" if bot_username else ""}
-            </div>
-
-            <div class="item">
-                <span class="title">🧠 وضعیت کلیدهای جمینای (GEMINI_API_KEYS)</span>
-                <ul>{keys_html}</ul>
-            </div>
-
-            <div class="item">
-                <span class="title">🔗 آدرس وب‌هوک (RENDER_EXTERNAL_URL)</span>
-                <b>وضعیت:</b> {webhook_status}
-            </div>
-
-            <div class="alert">
-                💡 <b>راهنمای امنیتی برای گوشی:</b><br>
-                اگر ضربدر قرمز یا خطایی می‌بینید، نگران نباشید. کد شما ایمن است. کافیست وارد پنل رندر شده، به بخش <b>Environment</b> بروید و متغیرهای مورد نظر را با دقت اصلاح کنید. با ذخیره تغییرات، سرور شما خودکار آپدیت می‌شود.
-            </div>
-        </div>
-    </body>
-    </html>
-    """
-    return render_template_string(html), 200
-
-# Endpoint وب‌هوک برای پردازش پیام‌های دریافتی از تلگرام
-@app.route(f'/{BOT_TOKEN}' if BOT_TOKEN else '/dummy_route', methods=['POST'])
-def telegram_webhook():
-    if bot and request.headers.get('content-type') == 'application/json':
-        json_string = request.get_data().decode('utf-8')
-        update = telebot.types.Update.de_json(json_string)
-        bot.process_new_updates([update])
-        return 'OK', 200
-    return 'Unauthorized', 403
-
-# ==========================================
-# ۳. هوش مصنوعی و مدیریت کلیدها (چرخش خودکار)
-# ==========================================
-if bot and len(GEMINI_KEYS) > 0:
-    current_key_index = 0
-
-    def get_gemini_model():
-        global current_key_index
-        system_prompt = (
-            "You are an expert Senior Software Engineer. Help the user with programming, "
-            "debugging, and code optimization. Provide clean, well-commented code blocks in Markdown."
-        )
-        genai.configure(api_key=GEMINI_KEYS[current_key_index])
-        return genai.GenerativeModel(
-            model_name='gemini-1.5-flash',
-            system_instruction=system_prompt
-        )
-
-    def rotate_key():
-        global current_key_index
-        if len(GEMINI_KEYS) > 1:
-            current_key_index = (current_key_index + 1) % len(GEMINI_KEYS)
-            print(f"🔄 Switched to API Key Index: {current_key_index}")
-
-    @bot.message_handler(commands=['start'])
-    def send_welcome(message):
-        welcome_text = (
-            "💻 به ربات هوشمند برنامه‌نویسی Gemix خوش آمدید!\n\n"
-            "من یک متخصص ارشد برنامه‌نویسی، دیباگ و بهینه‌سازی کد هستم. "
-            "سوال یا کد باگ‌دارت رو برام بفرست تا با بالاترین سرعت برات حلش کنم."
-        )
-        bot.reply_to(message, welcome_text)
-
-    @bot.message_handler(func=lambda message: True)
-    def handle_ai_request(message):
-        chat_id = message.chat.id
-        bot.send_chat_action(chat_id, 'typing')
-        
-        # تلاش متوالی روی کلیدها در صورت بروز خطا یا لیمیت
-        for _ in range(len(GEMINI_KEYS)):
-            try:
-                model = get_gemini_model()
-                response = model.generate_content(message.text)
-                bot.reply_to(message, response.text, parse_mode='Markdown')
-                return
-            except Exception as e:
-                print(f"❌ Error with key index {current_key_index}: {e}")
-                rotate_key()
-                bot.send_chat_action(chat_id, 'typing')
-                time.sleep(1)
-                
-        bot.reply_to(message, "⚠️ تمام کلیدهای من موقتاً به محدودیت ظرفیت برخورد کرده‌اند. لطفاً چند دقیقه دیگر مجدداً تلاش کنید.")
-
-# ==========================================
-# ۴. اجرای وب سرور
-# ==========================================
-if __name__ == '__main__':
+def keep_alive_server():
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
+
+# روشن کردن سرور فِیک در یک Thread مجزا
+Thread(target=keep_alive_server, daemon=True).start()
+logger.info("Keep-Alive server started successfully to prevent Render Port Timeout.")
+
+# ۳. مدیریت امن توکن‌ها از طریق متغیرهای محیطی (Environment Variables)
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+
+# دریافت ۳ تا API Key جمینای برای جلوگیری از محدودیت درخواست (Rate Limit)
+GEMINI_KEYS = [
+    os.environ.get("GEMINI_KEY_1"),
+    os.environ.get("GEMINI_KEY_2"),
+    os.environ.get("GEMINI_KEY_3")
+]
+
+# فیلتر کردن کلیدهای خالی جهت پایداری سیستم
+GEMINI_KEYS = [key for key in GEMINI_KEYS if key]
+
+if not TOKEN:
+    critical_error = "CRITICAL ERROR: TELEGRAM_BOT_TOKEN is missing!"
+    logger.critical(critical_error)
+    raise ValueError(critical_error)
+
+if not GEMINI_KEYS:
+    critical_error = "CRITICAL ERROR: At least one GEMINI_KEY must be provided!"
+    logger.critical(critical_error)
+    raise ValueError(critical_error)
+
+# ۴. سیستم چرخشی پیشرفته مدیریت کلیدهای هوش مصنوعی (API Key Rotator)
+class APIKeyRotator:
+    def __init__(self, keys):
+        self.keys = keys
+        self.index = 0
+        self.lock = asyncio.Lock()
+
+    async def get_next_client(self) -> genai.Client:
+        async with self.lock:
+            key = self.keys[self.index]
+            # چرخش ایندکس بین کلیدها
+            self.index = (self.index + 1) % len(self.keys)
+            logger.info(f"Rotating to API Key Index: {self.index} to balance load.")
+            return genai.Client(api_key=key)
+
+rotator = APIKeyRotator(GEMINI_KEYS)
+
+# ۵. سیستم مدیریت حافظه و تاریخچه گفتگو به تفکیک کاربر (Session Handler)
+class UserSessionManager:
+    def __init__(self):
+        # نگهداری سوابق چت به صورت ساختار یافته
+        self.history = defaultdict(list)
+        # سیستم ضد اسپم (Anti-Flood Rate Limiting) برای جلوگیری از مسدود سازی تلگرام
+        self.last_request = defaultdict(lambda: datetime.min)
+        # دستورالعمل سیستم فوق‌العاده قوی برای تخصصی کردن پاسخ‌های جمینای در حوزه کدنویسی
+        self.system_instruction = (
+            "You are a Senior Software Engineer, Software Architect, and Elite Code Debugger "
+            "with over 20 years of experience. Your mission is to analyze complex code, discover "
+            "hidden bugs, optimize memory leaks, and write clean, production-ready, efficient code. "
+            "Always explain the 'why' behind your fixes using professional tech terminology. "
+            "Format code blocks properly using markdown with the appropriate language specified."
+        )
+
+    def get_history(self, user_id: int):
+        return self.history[user_id]
+
+    def add_to_history(self, user_id: int, role: str, text: str):
+        self.history[user_id].append({"role": role, "parts": [{"text": text}]})
+        # نگهداری حداکثر ۲۰ پیام آخر برای مدیریت مصرف توکن و پردازش بهینه
+        if len(self.history[user_id]) > 20:
+            self.history[user_id] = self.history[user_id][-20:]
+
+    def clear_history(self, user_id: int):
+        if user_id in self.history:
+            del self.history[user_id]
+
+    def is_flooding(self, user_id: int) -> bool:
+        # محدودیت ۳ ثانیه فاصله بین هر درخواست کاربر برای امنیت سرور
+        now = datetime.now()
+        if now - self.last_request[user_id] < timedelta(seconds=3):
+            return True
+        self.last_request[user_id] = now
+        return False
+
+session_manager = UserSessionManager()
+
+# ۶. مقداردهی اولیه ربات با تنظیمات امنیتی ساختار ناهمگام (Async Bot Initialization)
+bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
+dp = Dispatcher()
+
+# دستور /start
+@dp.message(CommandStart())
+async def cmd_start(message: types.Message):
+    user_name = message.from_user.first_name
+    welcome_text = (
+        f"سلام *{user_name}* گرامی! 🚀\n\n"
+        "به ربات تخصصی مهندسی نرم‌افزار و هوش مصنوعی توسعه‌دهندگان خوش آمدید.\n\n"
+        "🔹 **قابلیت‌ها:**\n"
+        "• تحلیل و دیباگ کدهای پیچیده کامپایلری\n"
+        "• بهینه‌سازی کدهای چندرشته‌ای و معماری سیستم\n"
+        "• خواندن اسکرین‌شات ارورها و حل باگ خودکار\n\n"
+        "📝 برای شروع، کد یا سوال فنی خود را بفرستید. برای پاکسازی حافظه چت دستور /clear را بزنید."
+    )
+    await message.answer(welcome_text)
+
+# دستور /clear برای ریست حافظه
+@dp.message(Command("clear"))
+async def cmd_clear(message: types.Message):
+    session_manager.clear_history(message.from_user.id)
+    await message.answer("🧹 *حافظه چت شما با موفقیت پاک شد.* ربات آماده چالش‌های جدید است!")
+
+# ۷. پردازنده هوشمند درخواست‌های متنی (Text Code Processor)
+@dp.message(F.text & ~F.text.startswith('/'))
+async def handle_text_query(message: types.Message):
+    user_id = message.from_user.id
+    
+    # مکانیزم امنیتی ضد اسپم تلگرام
+    if session_manager.is_flooding(user_id):
+        await message.answer("⚠️ لطفاً کمی آرام‌تر! برای پایداری سرور، بین پیام‌ها ۳ ثانیه فاصله بگذارید.")
+        return
+
+    # ارسال وضعیت "در حال تایپ" به تلگرام جهت ایجاد تجربه کاربری عالی
+    await bot.send_chat_action(chat_id=message.chat.id, action="typing")
+    status_msg = await message.answer("🤖 *در حال تحلیل کدهای شما توسط مغز هوش مصنوعی...*")
+
+    try:
+        # دریافت کلاینت بعدی از چرخنده کدهای گوگل
+        client = await rotator.get_next_client()
+        
+        # بازیابی سوابق چت و چسباندن پیام جدید
+        user_text = message.text
+        chat_history = session_manager.get_history(user_id)
+        
+        # تبدیل تاریخچه محلی به قالب رسمی ساختار جمینای نوع داده Content
+        contents = []
+        for h in chat_history:
+            contents.append(genai_types.Content(role=h["role"], parts=[genai_types.Part.from_text(text=h["parts"][0]["text"])]))
+        
+        # افزودن پیام فعلی کاربر
+        contents.append(genai_types.Content(role="user", parts=[genai_types.Part.from_text(text=user_text)]))
+
+        # فراخوانی API به صورت کاملاً غیرمسدودکننده (Asynchronous Wrapped Exec)
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: client.models.generate_content(
+                model='gemini-1.5-pro',  # استفاده از قوی‌ترین مدل برای کدهای پیچیده
+                contents=contents,
+                config=genai_types.GenerateContentConfig(
+                    system_instruction=session_manager.system_instruction,
+                    temperature=0.2, # کاهش خلاقیت برای افزایش دقت در کدهای فنی
+                    max_output_tokens=4000
+                )
+            )
+        )
+
+        ai_response = response.text
+        
+        # ذخیره در حافظه لوکال سرور برای پیام‌های بعدی
+        session_manager.add_to_history(user_id, "user", user_text)
+        session_manager.add_to_history(user_id, "model", ai_response)
+
+        # ارسال نهایی پاسخ به تلگرام و پاک کردن پیام وضعیت
+        await status_msg.delete()
+        
+        # اگر پاسخ طولانی بود، تلگرام محدودیت ۴۰۹۶ کاراکتر دارد؛ آن را تکه‌تکه ارسال می‌کنیم
+        if len(ai_response) > 4000:
+            for i in range(0, len(ai_response), 4000):
+                await message.answer(ai_response[i:i+4000])
+        else:
+            await message.answer(ai_response)
+
+    except Exception as e:
+        logger.error(f"Error while processing text for user {user_id}: {str(e)}")
+        await status_msg.edit_text("❌ متأسفانه مشکلی در پردازش کد رخ داد. لطفاً دوباره تلاش کنید.")
+
+# ۸. پردازنده مولتی‌مدیا و بینایی ماشین برای اسکرین‌شات‌ها (Vision Error Processor)
+@dp.message(F.photo)
+async def handle_photo_query(message: types.Message):
+    user_id = message.from_user.id
+    
+    if session_manager.is_flooding(user_id):
+        await message.answer("⚠️ لطفاً بین ارسال درخواست‌ها کمی فاصله بگذارید.")
+        return
+
+    await bot.send_chat_action(chat_id=message.chat.id, action="typing")
+    status_msg = await message.answer("📸 *اسکرین‌شات شما دریافت شد. در حال اسکن خطاهای تصویری...*")
+
+    try:
+        # ۱. دانلود فایل تصویر از سرورهای تلگرام در مموری بایت‌ها بدون ذخیره روی هارد دیسک (امنیت و سرعت بالاترا)
+        photo = message.photo[-1] # انتخاب باکیفیت‌ترین نسخه عکس
+        file_info = await bot.get_file(photo.file_id)
+        
+        file_buffer = BytesIO()
+        await bot.download_file(file_info.file_path, file_buffer)
+        file_buffer.seek(0)
+        
+        # ۲. باز کردن عکس با PIL Pillow
+        img = Image.open(file_buffer)
+
+        # کلاینت هوش مصنوعی چرخشی
+        client = await rotator.get_next_client()
+        
+        caption = message.caption if message.caption else "این اسکرین‌شات از باگ یا محیط کدهای من است. آن را تحلیل کن و دقیقاً بگو مشکل کجاست و چطور حل می‌شود."
+
+        # ۳. ارسال همزمان عکس و متن به مدل مولتی‌مدیال
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: client.models.generate_content(
+                model='gemini-1.5-flash', # مدل فلش برای کارهای دیداری فوق‌العاده سریع و دقیق عمل می‌کند
+                contents=[img, caption],
+                config=genai_types.GenerateContentConfig(
+                    system_instruction=session_manager.system_instruction,
+                    temperature=0.3
+                )
+            )
+        )
+
+        ai_response = response.text
+        
+        # اضافه کردن خلاصه به تاریخچه متنی کاربر
+        session_manager.add_to_history(user_id, "user", f"[ارسال تصویر با موضوع]: {caption}")
+        session_manager.add_to_history(user_id, "model", ai_response)
+
+        await status_msg.delete()
+        
+        if len(ai_response) > 4000:
+            for i in range(0, len(ai_response), 4000):
+                await message.answer(ai_response[i:i+4000])
+        else:
+            await message.answer(ai_response)
+
+    except Exception as e:
+        logger.error(f"Error while processing photo for user {user_id}: {str(e)}")
+        await status_msg.edit_text("❌ خطایی در خواندن تصویر یا پردازش آن توسط هوش مصنوعی رخ داد.")
+
+# ۹. تابع اصلی راه اندازی کل سیستم با تضمین مدیریت خطاهای پولینگ
+async def main():
+    logger.info("Initializing Bot Polling Session...")
+    try:
+        # حذف هرگونه وب‌هوک قدیمی برای جلوگیری از اختلال در اتصال
+        await bot.delete_webhook(drop_pending_updates=True)
+        # استارت زدن حلقه اصلی اجرای ربات
+        await dp.start_polling(bot)
+    except Exception as e:
+        logger.critical(f"Bot execution stopped due to polling error: {str(e)}")
+    finally:
+        await bot.session.close()
+
+if __name__ == "__main__":
+    # اجرای پروژه در ساختار لوپ پایتون
+    asyncio.run(main())
+    
