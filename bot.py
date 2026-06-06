@@ -22,9 +22,9 @@ user_requests = {}
 
 def ask_gemini_direct(prompt_text, image_base64=None, mime_type=None):
     if not GEMINI_KEYS:
-        return "❌ خطای زیرساخت: هیچ کلید API فعالی تعریف نشده است."
+        return "❌ هیچ کلید API تعریف نشده."
 
-    for api_key in GEMINI_KEYS:
+    for i, api_key in enumerate(GEMINI_KEYS):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
         headers = {'Content-Type': 'application/json'}
 
@@ -57,23 +57,27 @@ def ask_gemini_direct(prompt_text, image_base64=None, mime_type=None):
         }
 
         try:
-            response = requests.post(url, json=payload, headers=headers, timeout=45)  # ← از 20 به 45
+            response = requests.post(url, json=payload, headers=headers, timeout=45)
+            
+            # ← لاگ برای دیباگ
+            print(f"Key {i+1} status: {response.status_code}")
+            print(f"Key {i+1} response: {response.text[:300]}")
 
             if response.status_code == 200:
                 res_json = response.json()
                 return res_json['candidates'][0]['content']['parts'][0]['text']
             else:
-                print(f"Key failed with status {response.status_code}, trying next key...")
+                print(f"Key {i+1} failed, trying next...")
                 continue
 
         except requests.exceptions.Timeout:
-            print(f"Timeout on this key, trying next...")
+            print(f"Key {i+1} timeout")
             continue
         except Exception as e:
-            print(f"Connection error: {str(e)}")
+            print(f"Key {i+1} error: {str(e)}")
             continue
 
-    return "⚠️ همه کلیدها با خطا مواجه شدند. چند لحظه دیگر پیام دهید."
+    return "⚠️ همه کلیدها با خطا مواجه شدند. لطفاً کلیدهای Gemini را در Render بررسی کنید."
 
 
 def check_rate_limit(user_id):
@@ -125,7 +129,7 @@ def process_incoming_photo(message):
 
     except Exception as e:
         print(f"Photo handler error: {str(e)}")
-        bot.reply_to(message, "❌ پردازش تصویر با خطا مواجه شد. دوباره تلاش کنید.")
+        bot.reply_to(message, "❌ پردازش تصویر با خطا مواجه شد.")
 
 
 @bot.message_handler(func=lambda message: True)
@@ -137,7 +141,7 @@ def process_incoming_text(message):
 
     bot.send_chat_action(message.chat.id, 'typing')
 
-    try:  # ← اضافه شد
+    try:
         ai_reply = ask_gemini_direct(message.text)
         try:
             bot.reply_to(message, ai_reply, parse_mode="Markdown")
