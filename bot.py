@@ -6,8 +6,9 @@ import requests
 import telebot
 from flask import Flask, request
 
-os.environ['PYTHONUNBUFFERED'] = '1'
-
+# ==========================================
+# متغیرهای محیطی
+# ==========================================
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 RENDER_URL = os.environ.get('RENDER_URL')
 
@@ -18,13 +19,17 @@ GEMINI_KEYS = [
 ]
 GEMINI_KEYS = [key for key in GEMINI_KEYS if key]
 
-print(f"Loaded {len(GEMINI_KEYS)} Gemini keys", flush=True)
+print(f"✅ {len(GEMINI_KEYS)} Gemini key loaded", flush=True)
+print(f"✅ RENDER_URL: {RENDER_URL}", flush=True)
 
-bot = telebot.TeleBot(TOKEN)
+bot = telebot.TeleBot(TOKEN, threaded=False)
 app = Flask(__name__)
 
 user_requests = {}
 
+# ==========================================
+# ارتباط با Gemini
+# ==========================================
 def ask_gemini_direct(prompt_text, image_base64=None, mime_type=None):
     if not GEMINI_KEYS:
         return "❌ هیچ کلید API تعریف نشده."
@@ -52,9 +57,7 @@ def ask_gemini_direct(prompt_text, image_base64=None, mime_type=None):
 
         payload = {
             "contents": [{"parts": contents_parts}],
-            "systemInstruction": {
-                "parts": [{"text": system_prompt}]
-            },
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
             "generationConfig": {
                 "temperature": 0.2,
                 "maxOutputTokens": 4000
@@ -62,28 +65,31 @@ def ask_gemini_direct(prompt_text, image_base64=None, mime_type=None):
         }
 
         try:
-            print(f"Trying key {i+1}...", flush=True)
+            print(f"🔑 Trying key {i+1}...", flush=True)
             response = requests.post(url, json=payload, headers=headers, timeout=45)
-            print(f"Key {i+1} status: {response.status_code}", flush=True)
-            print(f"Key {i+1} response: {response.text[:300]}", flush=True)
+            print(f"📊 Key {i+1} status: {response.status_code}", flush=True)
 
             if response.status_code == 200:
                 res_json = response.json()
+                print(f"✅ Key {i+1} success!", flush=True)
                 return res_json['candidates'][0]['content']['parts'][0]['text']
             else:
-                print(f"Key {i+1} failed, trying next...", flush=True)
+                print(f"❌ Key {i+1} failed: {response.text[:200]}", flush=True)
                 continue
 
         except requests.exceptions.Timeout:
-            print(f"Key {i+1} timeout", flush=True)
+            print(f"⏱ Key {i+1} timeout", flush=True)
             continue
         except Exception as e:
-            print(f"Key {i+1} error: {str(e)}", flush=True)
+            print(f"💥 Key {i+1} error: {str(e)}", flush=True)
             continue
 
-    return "⚠️ همه کلیدها با خطا مواجه شدند. لطفاً کلیدهای Gemini را در Render بررسی کنید."
+    return "⚠️ همه کلیدها با خطا مواجه شدند. لطفاً چند لحظه دیگر پیام دهید."
 
 
+# ==========================================
+# محدودیت نرخ
+# ==========================================
 def check_rate_limit(user_id):
     now = time.time()
     if user_id not in user_requests:
@@ -95,6 +101,9 @@ def check_rate_limit(user_id):
     return False
 
 
+# ==========================================
+# هندلرهای تلگرام
+# ==========================================
 @bot.message_handler(commands=['start', 'help'])
 def welcome_user(message):
     welcome_message = (
@@ -132,7 +141,7 @@ def process_incoming_photo(message):
             bot.reply_to(message, ai_reply)
 
     except Exception as e:
-        print(f"Photo handler error: {str(e)}", flush=True)
+        print(f"📸 Photo handler error: {str(e)}", flush=True)
         bot.reply_to(message, "❌ پردازش تصویر با خطا مواجه شد.")
 
 
@@ -146,17 +155,20 @@ def process_incoming_text(message):
     bot.send_chat_action(message.chat.id, 'typing')
 
     try:
-        print(f"Received message: {message.text[:50]}", flush=True)
+        print(f"💬 Message: {message.text[:50]}", flush=True)
         ai_reply = ask_gemini_direct(message.text)
         try:
             bot.reply_to(message, ai_reply, parse_mode="Markdown")
         except Exception:
             bot.reply_to(message, ai_reply)
     except Exception as e:
-        print(f"Text handler error: {str(e)}", flush=True)
+        print(f"💥 Text handler error: {str(e)}", flush=True)
         bot.reply_to(message, "❌ خطایی رخ داد، دوباره تلاش کن.")
 
 
+# ==========================================
+# Flask routes
+# ==========================================
 @app.route('/' + TOKEN, methods=['POST'])
 def receive_telegram_updates():
     try:
@@ -165,20 +177,27 @@ def receive_telegram_updates():
         bot.process_new_updates([update_obj])
         return "OK", 200
     except Exception as e:
-        print(f"Webhook Error: {str(e)}", flush=True)
+        print(f"🔴 Webhook Error: {str(e)}", flush=True)
         return "Error", 500
 
 
 @app.route("/")
-def render_keep_alive_endpoint():
+def keep_alive():
+    # فقط یه پاسخ ساده - بدون set_webhook
+    return "<h1>Gemini Bot: Online ✅</h1>", 200
+
+
+# ==========================================
+# اجرا - webhook فقط یه بار set میشه
+# ==========================================
+if __name__ == "__main__":
+    print("🚀 Setting webhook...", flush=True)
     try:
         bot.remove_webhook()
-        time.sleep(0.1)
-        bot.set_webhook(url=f"{RENDER_URL}/{TOKEN}")
-        return "<h1>Gemini Bot: Online</h1>", 200
+        time.sleep(2)
+        result = bot.set_webhook(url=f"{RENDER_URL}/{TOKEN}")
+        print(f"✅ Webhook set: {result}", flush=True)
     except Exception as e:
-        return f"<h1>Error</h1><p>{str(e)}</p>", 500
+        print(f"❌ Webhook error: {str(e)}", flush=True)
 
-
-if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 5000)))
