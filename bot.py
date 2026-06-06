@@ -6,9 +6,6 @@ import requests
 import telebot
 from flask import Flask, request
 
-# ==========================================
-# متغیرهای محیطی
-# ==========================================
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 RENDER_URL = os.environ.get('RENDER_URL')
 
@@ -27,9 +24,6 @@ app = Flask(__name__)
 
 user_requests = {}
 
-# ==========================================
-# ارتباط با Gemini
-# ==========================================
 def ask_gemini_direct(prompt_text, image_base64=None, mime_type=None):
     if not GEMINI_KEYS:
         return "❌ هیچ کلید API تعریف نشده."
@@ -68,13 +62,14 @@ def ask_gemini_direct(prompt_text, image_base64=None, mime_type=None):
             print(f"🔑 Trying key {i+1}...", flush=True)
             response = requests.post(url, json=payload, headers=headers, timeout=45)
             print(f"📊 Key {i+1} status: {response.status_code}", flush=True)
+            print(f"📝 Key {i+1} response: {response.text[:300]}", flush=True)
 
             if response.status_code == 200:
                 res_json = response.json()
                 print(f"✅ Key {i+1} success!", flush=True)
                 return res_json['candidates'][0]['content']['parts'][0]['text']
             else:
-                print(f"❌ Key {i+1} failed: {response.text[:200]}", flush=True)
+                print(f"❌ Key {i+1} failed, trying next...", flush=True)
                 continue
 
         except requests.exceptions.Timeout:
@@ -87,9 +82,6 @@ def ask_gemini_direct(prompt_text, image_base64=None, mime_type=None):
     return "⚠️ همه کلیدها با خطا مواجه شدند. لطفاً چند لحظه دیگر پیام دهید."
 
 
-# ==========================================
-# محدودیت نرخ
-# ==========================================
 def check_rate_limit(user_id):
     now = time.time()
     if user_id not in user_requests:
@@ -101,9 +93,6 @@ def check_rate_limit(user_id):
     return False
 
 
-# ==========================================
-# هندلرهای تلگرام
-# ==========================================
 @bot.message_handler(commands=['start', 'help'])
 def welcome_user(message):
     welcome_message = (
@@ -166,9 +155,6 @@ def process_incoming_text(message):
         bot.reply_to(message, "❌ خطایی رخ داد، دوباره تلاش کن.")
 
 
-# ==========================================
-# Flask routes
-# ==========================================
 @app.route('/' + TOKEN, methods=['POST'])
 def receive_telegram_updates():
     try:
@@ -183,13 +169,9 @@ def receive_telegram_updates():
 
 @app.route("/")
 def keep_alive():
-    # فقط یه پاسخ ساده - بدون set_webhook
     return "<h1>Gemini Bot: Online ✅</h1>", 200
 
 
-# ==========================================
-# اجرا - webhook فقط یه بار set میشه
-# ==========================================
 if __name__ == "__main__":
     print("🚀 Setting webhook...", flush=True)
     try:
@@ -200,4 +182,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"❌ Webhook error: {str(e)}", flush=True)
 
-    app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 5000)))
+    app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 10000)))
