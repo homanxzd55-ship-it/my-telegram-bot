@@ -1,9 +1,12 @@
 import os
+import sys
 import time
 import base64
 import requests
 import telebot
 from flask import Flask, request
+
+os.environ['PYTHONUNBUFFERED'] = '1'
 
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 RENDER_URL = os.environ.get('RENDER_URL')
@@ -14,6 +17,8 @@ GEMINI_KEYS = [
     os.environ.get('GEMINI_API_KEY_3')
 ]
 GEMINI_KEYS = [key for key in GEMINI_KEYS if key]
+
+print(f"Loaded {len(GEMINI_KEYS)} Gemini keys", flush=True)
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
@@ -57,24 +62,23 @@ def ask_gemini_direct(prompt_text, image_base64=None, mime_type=None):
         }
 
         try:
+            print(f"Trying key {i+1}...", flush=True)
             response = requests.post(url, json=payload, headers=headers, timeout=45)
-            
-            # ← لاگ برای دیباگ
-            print(f"Key {i+1} status: {response.status_code}")
-            print(f"Key {i+1} response: {response.text[:300]}")
+            print(f"Key {i+1} status: {response.status_code}", flush=True)
+            print(f"Key {i+1} response: {response.text[:300]}", flush=True)
 
             if response.status_code == 200:
                 res_json = response.json()
                 return res_json['candidates'][0]['content']['parts'][0]['text']
             else:
-                print(f"Key {i+1} failed, trying next...")
+                print(f"Key {i+1} failed, trying next...", flush=True)
                 continue
 
         except requests.exceptions.Timeout:
-            print(f"Key {i+1} timeout")
+            print(f"Key {i+1} timeout", flush=True)
             continue
         except Exception as e:
-            print(f"Key {i+1} error: {str(e)}")
+            print(f"Key {i+1} error: {str(e)}", flush=True)
             continue
 
     return "⚠️ همه کلیدها با خطا مواجه شدند. لطفاً کلیدهای Gemini را در Render بررسی کنید."
@@ -128,7 +132,7 @@ def process_incoming_photo(message):
             bot.reply_to(message, ai_reply)
 
     except Exception as e:
-        print(f"Photo handler error: {str(e)}")
+        print(f"Photo handler error: {str(e)}", flush=True)
         bot.reply_to(message, "❌ پردازش تصویر با خطا مواجه شد.")
 
 
@@ -142,13 +146,14 @@ def process_incoming_text(message):
     bot.send_chat_action(message.chat.id, 'typing')
 
     try:
+        print(f"Received message: {message.text[:50]}", flush=True)
         ai_reply = ask_gemini_direct(message.text)
         try:
             bot.reply_to(message, ai_reply, parse_mode="Markdown")
         except Exception:
             bot.reply_to(message, ai_reply)
     except Exception as e:
-        print(f"Text handler error: {str(e)}")
+        print(f"Text handler error: {str(e)}", flush=True)
         bot.reply_to(message, "❌ خطایی رخ داد، دوباره تلاش کن.")
 
 
@@ -160,7 +165,7 @@ def receive_telegram_updates():
         bot.process_new_updates([update_obj])
         return "OK", 200
     except Exception as e:
-        print(f"Webhook Error: {str(e)}")
+        print(f"Webhook Error: {str(e)}", flush=True)
         return "Error", 500
 
 
